@@ -1,4 +1,4 @@
-# ❀ RedPanel — Minecraft Hosting Panel
+# ❀ AlpinePanel — Minecraft Hosting Panel
 
 Red & white Minecraft hosting panel with falling flowers in the sidebar. Servers run in **Docker** (no KVM needed — works on a normal VPS *or* a Docker-container VPS). A **local node is set up automatically**.
 
