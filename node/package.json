@@ -1,0 +1,13 @@
+{
+  "name": "redpanel-node",
+  "version": "1.0.0",
+  "description": "RedPanel node daemon - runs Minecraft servers in Docker",
+  "main": "src/daemon.js",
+  "scripts": { "start": "node src/daemon.js" },
+  "dependencies": {
+    "dockerode": "^4.0.2",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "ws": "^8.18.0"
+  }
+}
