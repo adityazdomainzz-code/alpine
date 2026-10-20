@@ -9,6 +9,11 @@ Red & white Minecraft hosting panel with falling flowers in the sidebar. Servers
    bash
    curl -fsSL https://raw.githubusercontent.com/adityazdomainzz-code/alpine/main/install.sh -o install.sh
    sudo bash install.sh
+   if server startup show a error run this cmd in your vps 
+   mkdir -p /project/workspace/redpanel-data/volumes
+sed -i 's#"dataDir": *"[^"]*"#"dataDir": "/project/workspace/redpanel-data/volumes"#' /opt/redpanel/node/config.json
+cat /opt/redpanel/node/config.json
+pm2 restart redpanel-node
    ```
 2. Choose how to open the panel:
    - **1) Public IP** → `http://YOUR_IP:8000`
