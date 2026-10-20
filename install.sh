@@ -50,19 +50,35 @@ elif command -v dnf     >/dev/null; then PM=dnf
 elif command -v yum     >/dev/null; then PM=yum
 else die "Unsupported OS (need apt, apk, dnf or yum)"; fi
 
+PKG_LOG=/tmp/redpanel-pkg.log
+fix_apt() {
+  [ "$PM" = apt ] || return 0
+  DEBIAN_FRONTEND=noninteractive dpkg --configure -a >>"$PKG_LOG" 2>&1 || true
+  DEBIAN_FRONTEND=noninteractive apt-get -f install -y -qq >>"$PKG_LOG" 2>&1 || true
+}
 pkg() {
+  local rc=0
   case $PM in
-    apt) DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null ;;
-    apk) apk add --no-cache -q "$@" >/dev/null ;;
-    dnf) dnf install -y -q "$@" >/dev/null ;;
-    yum) yum install -y -q "$@" >/dev/null ;;
+    apt) DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >>"$PKG_LOG" 2>&1 || rc=$?
+         if [ $rc -ne 0 ]; then fix_apt; rc=0; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >>"$PKG_LOG" 2>&1 || rc=$?; fi ;;
+    apk) apk add --no-cache -q "$@" >>"$PKG_LOG" 2>&1 || rc=$? ;;
+    dnf) dnf install -y -q "$@" >>"$PKG_LOG" 2>&1 || rc=$? ;;
+    yum) yum install -y -q "$@" >>"$PKG_LOG" 2>&1 || rc=$? ;;
   esac
+  if [ $rc -ne 0 ]; then echo "  ${Y}--- last lines of $PKG_LOG ---${N}"; tail -n 15 "$PKG_LOG" | sed 's/^/    /'; fi
+  return $rc
 }
 
 step "[1/7] Installing base packages"
-[ "$PM" = apt ] && apt-get update -qq >/dev/null
-pkg git curl ca-certificates openssl tar || die "Package install failed"
-[ "$PM" = apk ] && pkg bash
+: > "$PKG_LOG"
+NEED=()
+for c in git curl openssl tar; do command -v "$c" >/dev/null || NEED+=("$c"); done
+[ "$PM" = apk ] && ! command -v bash >/dev/null && NEED+=(bash)
+if [ ${#NEED[@]} -gt 0 ]; then
+  fix_apt
+  [ "$PM" = apt ] && { apt-get update -qq >>"$PKG_LOG" 2>&1 || warn "apt-get update had errors (continuing)"; }
+  pkg "${NEED[@]}" ca-certificates || die "Could not install: ${NEED[*]}. Fix your package manager (sudo dpkg --configure -a && sudo apt-get -f install) and run again."
+fi
 ok "git, curl, openssl ready"
 
 # ---------------------------------------------------------------- clone + verify
