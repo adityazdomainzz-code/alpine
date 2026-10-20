@@ -4,19 +4,13 @@ Red & white Minecraft hosting panel with falling flowers in the sidebar. Servers
 
 ## Install (1 command)
 
-1. Upload these files to the root of your repo: `https://github.com/adityazdomainzz-code/alpine`
-   ```
-   install.sh
-   panel/
-   node/
-   README.md
-   ```
-2. On the VPS (as root):
-   ```bash
+```1. On the VPS (as root):
+ git clone https://github.com/adityazdomainzz-code/alpine.git
+   bash
    curl -fsSL https://raw.githubusercontent.com/adityazdomainzz-code/alpine/main/install.sh -o install.sh
    sudo bash install.sh
    ```
-3. Choose how to open the panel:
+2. Choose how to open the panel:
    - **1) Public IP** → `http://YOUR_IP:8000`
    - **2) Cloudflare Tunnel** → paste a tunnel token, add a Public Hostname pointing to `http://localhost:8000`
 
