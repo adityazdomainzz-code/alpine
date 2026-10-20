@@ -13,7 +13,8 @@ const db = require('./db');
 
 const CONFIG_FILE = path.join(__dirname, '..', 'config.json');
 const cfg = fs.existsSync(CONFIG_FILE) ? JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) : {};
-const PORT = process.env.PORT || cfg.port || 8000;
+// config wins over $PORT: platforms like Railway export PORT for their own services
+const PORT = cfg.port || process.env.PORT || 8000;
 const D = db.load();
 
 // ---------- first boot seeding ----------
@@ -94,7 +95,7 @@ function serverView(s) {
   const n = nodeById(s.nodeId);
   const owner = D.users.find((u) => u.id === s.ownerId);
   return {
-    ...s, nodeName: n ? n.name : 'deleted node', address: n ? `${n.ip}:${s.port}` : '-',
+    ...s, nodeName: n ? n.name : 'deleted node', address: s.publicAddress || (n ? `${n.ip}:${s.port}` : '-'),
     ownerName: owner ? owner.username : '-',
     subdomains: D.subdomains.filter((d) => d.serverId === s.id).map((d) => d.fqdn),
   };
@@ -102,17 +103,44 @@ function serverView(s) {
 function contentFolder(s) { return s.software === 'fabric' || s.software === 'forge' ? '/mods' : '/plugins'; }
 
 // ---------- public ----------
-app.get('/api/settings/public', (req, res) => res.json({ panelName: D.settings.panelName }));
+if (D.settings.registration === undefined) { D.settings.registration = true; db.save(); }
+app.get('/api/settings/public', (req, res) => res.json({ panelName: D.settings.panelName, registration: !!D.settings.registration }));
 
-app.post('/api/auth/login', wrap(async (req, res) => {
-  const { username, password } = req.body || {};
-  const u = D.users.find((x) => x.username.toLowerCase() === String(username || '').toLowerCase() || (x.email && x.email.toLowerCase() === String(username || '').toLowerCase()));
-  if (!u || !bcrypt.compareSync(String(password || ''), u.password)) throw fail(401, 'Wrong username or password');
+function startSession(req, res, u) {
   const token = crypto.randomBytes(32).toString('hex');
   for (const [k, v] of Object.entries(D.sessions)) if (v.expires < Date.now()) delete D.sessions[k];
   D.sessions[token] = { userId: u.id, expires: Date.now() + 7 * 864e5 };
   db.save();
   res.setHeader('Set-Cookie', `rp_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${7 * 86400}${req.secure || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : ''}`);
+}
+
+app.post('/api/auth/login', wrap(async (req, res) => {
+  const { username, password } = req.body || {};
+  const u = D.users.find((x) => x.username.toLowerCase() === String(username || '').toLowerCase() || (x.email && x.email.toLowerCase() === String(username || '').toLowerCase()));
+  if (!u || !bcrypt.compareSync(String(password || ''), u.password)) throw fail(401, 'Wrong username or password');
+  startSession(req, res, u);
+  res.json({ user: pubUser(u) });
+}));
+
+// public sign-up (admin can switch it off in Settings). New accounts are never admin.
+const regHits = new Map(); // ip -> [timestamps]
+app.post('/api/auth/register', wrap(async (req, res) => {
+  if (!D.settings.registration) throw fail(403, 'Registration is closed. Ask an admin for an account.');
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  const now = Date.now();
+  const hits = (regHits.get(ip) || []).filter((t) => now - t < 3600e3);
+  if (hits.length >= 5) throw fail(429, 'Too many sign-ups from your network. Try again later.');
+  const { username, email, password } = req.body || {};
+  if (!/^[\w.-]{3,24}$/.test(username || '')) throw fail(400, 'Username: 3-24 letters, numbers, _ . -');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email || '') || email.length > 120) throw fail(400, 'Enter a valid email');
+  if (!password || String(password).length < 6) throw fail(400, 'Password must be at least 6 characters');
+  const lu = username.toLowerCase(), le = email.toLowerCase();
+  if (D.users.some((u) => u.username.toLowerCase() === lu)) throw fail(400, 'Username taken');
+  if (D.users.some((u) => (u.email || '').toLowerCase() === le)) throw fail(400, 'Email already registered');
+  const u = { id: crypto.randomUUID(), username, email, password: bcrypt.hashSync(String(password), 10), admin: false, createdAt: now };
+  D.users.push(u);
+  hits.push(now); regHits.set(ip, hits);
+  startSession(req, res, u);
   res.json({ user: pubUser(u) });
 }));
 app.post('/api/auth/logout', (req, res) => {
@@ -123,7 +151,7 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 // ---------- account ----------
-app.get('/api/me', auth, (req, res) => res.json({ user: pubUser(req.user), panelName: D.settings.panelName, domain: D.cloudflare.domain, cloudflare: !!(D.cloudflare.apiToken && D.cloudflare.zoneId) }));
+app.get('/api/me', auth, (req, res) => res.json({ user: pubUser(req.user), panelName: D.settings.panelName, registration: !!D.settings.registration, domain: D.cloudflare.domain, cloudflare: !!(D.cloudflare.apiToken && D.cloudflare.zoneId) }));
 app.patch('/api/me', auth, wrap(async (req, res) => {
   const { email, currentPassword, newPassword } = req.body;
   if (email !== undefined) req.user.email = String(email).slice(0, 120);
@@ -279,13 +307,15 @@ app.post('/api/servers/:id/subdomains', auth, wrap(async (req, res) => {
   const fqdn = `${name}.${D.cloudflare.domain}`;
   if (D.subdomains.some((d) => d.fqdn === fqdn)) throw fail(400, 'Subdomain already taken');
   const node = nodeById(s.nodeId);
-  const isIp = /^\d+\.\d+\.\d+\.\d+$/.test(node.ip);
+  // public address override (e.g. Railway TCP proxy host:port) wins over node IP + port
+  const [targetHost, targetPort] = s.publicAddress ? [s.publicAddress.split(':')[0], +s.publicAddress.split(':')[1]] : [node.ip, s.port];
+  const isIp = /^\d+\.\d+\.\d+\.\d+$/.test(targetHost);
   const a = isIp
-    ? await cf('POST', '/dns_records', { type: 'A', name: fqdn, content: node.ip, proxied: false, ttl: 1, comment: 'RedPanel' })
-    : await cf('POST', '/dns_records', { type: 'CNAME', name: fqdn, content: node.ip, proxied: false, ttl: 1, comment: 'RedPanel' });
+    ? await cf('POST', '/dns_records', { type: 'A', name: fqdn, content: targetHost, proxied: false, ttl: 1, comment: 'RedPanel' })
+    : await cf('POST', '/dns_records', { type: 'CNAME', name: fqdn, content: targetHost, proxied: false, ttl: 1, comment: 'RedPanel' });
   let srvRec;
   try {
-    srvRec = await cf('POST', '/dns_records', { type: 'SRV', name: `_minecraft._tcp.${fqdn}`, data: { priority: 0, weight: 5, port: s.port, target: fqdn }, ttl: 1, comment: 'RedPanel' });
+    srvRec = await cf('POST', '/dns_records', { type: 'SRV', name: `_minecraft._tcp.${fqdn}`, data: { priority: 0, weight: 5, port: targetPort, target: fqdn }, ttl: 1, comment: 'RedPanel' });
   } catch (e) { await cf('DELETE', `/dns_records/${a.id}`).catch(() => {}); throw e; }
   const rec = { id: crypto.randomUUID(), name, fqdn, serverId: s.id, userId: req.user.id, recordIds: [a.id, srvRec.id], createdAt: Date.now() };
   D.subdomains.push(rec);
@@ -312,9 +342,12 @@ app.get('/api/admin/overview', auth, admin, (req, res) => {
 // settings (only admin can rename the panel)
 app.get('/api/admin/settings', auth, admin, (req, res) => res.json(D.settings));
 app.put('/api/admin/settings', auth, admin, wrap(async (req, res) => {
-  const name = String(req.body.panelName || '').trim();
-  if (!name || name.length > 40) throw fail(400, 'Panel name must be 1-40 characters');
-  D.settings.panelName = name;
+  if (req.body.panelName !== undefined) {
+    const name = String(req.body.panelName || '').trim();
+    if (!name || name.length > 40) throw fail(400, 'Panel name must be 1-40 characters');
+    D.settings.panelName = name;
+  }
+  if (req.body.registration !== undefined) D.settings.registration = !!req.body.registration;
   db.save();
   res.json(D.settings);
 }));
@@ -412,6 +445,11 @@ app.patch('/api/admin/servers/:id', auth, admin, wrap(async (req, res) => {
   if (!s) throw fail(404, 'Not found');
   if (req.body.name) s.name = String(req.body.name).slice(0, 40);
   if (req.body.ownerId && D.users.some((u) => u.id === req.body.ownerId)) s.ownerId = req.body.ownerId;
+  if (req.body.publicAddress !== undefined) {
+    const pa = String(req.body.publicAddress).trim();
+    if (pa && !/^[a-zA-Z0-9.-]+:\d{1,5}$/.test(pa)) throw fail(400, 'Public address must look like host:port');
+    s.publicAddress = pa || undefined;
+  }
   if (req.body.memory) { s.memory = Math.max(512, +req.body.memory); await nodeReq(nodeById(s.nodeId), 'PATCH', `/api/servers/${s.id}`, { memory: s.memory }); }
   db.save();
   res.json(serverView(s));

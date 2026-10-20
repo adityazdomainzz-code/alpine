@@ -106,9 +106,9 @@ window.addEventListener('hashchange', () => { document.body.classList.remove('na
 async function boot() {
   try {
     const j = await api('GET', '/api/me');
-    state.me = j.user; state.panelName = j.panelName; state.domain = j.domain; state.cfOn = j.cloudflare;
+    state.me = j.user; state.panelName = j.panelName; state.registration = j.registration; state.domain = j.domain; state.cfOn = j.cloudflare;
   } catch {
-    try { state.panelName = (await api('GET', '/api/settings/public')).panelName; } catch {}
+    try { const p = await api('GET', '/api/settings/public'); state.panelName = p.panelName; state.registration = p.registration; } catch {}
   }
   render();
 }
@@ -133,8 +133,9 @@ function render() {
 }
 
 // ---------- login ----------
-function renderLogin() {
+function renderLogin(mode = 'login') {
   if (state.flowers) { state.flowers.stop(); state.flowers = null; }
+  const reg = mode === 'register' && state.registration;
   $('#app').innerHTML = `
   <div class="login">
     <div class="login-art"><canvas></canvas>
@@ -143,17 +144,31 @@ function renderLogin() {
     </div>
     <div class="login-form"><form class="box" id="login">
       <div class="brand" style="padding:0 0 26px;color:var(--ink)"><div class="brand-mark" style="background:var(--red-soft)">${FLOWER}</div><div>${esc(state.panelName)}<small style="color:var(--muted)">Game Panel</small></div></div>
+      ${reg ? `
+      <h1>Create account</h1><p class="muted" style="margin:0 0 22px">Join ${esc(state.panelName)} in a few seconds.</p>
+      <label class="f"><span>Username</span><input class="input" name="username" autocomplete="username" pattern="[A-Za-z0-9_.\\-]{3,24}" title="3-24 letters, numbers, _ . -" required></label>
+      <label class="f"><span>Email</span><input class="input" type="email" name="email" autocomplete="email" required></label>
+      <label class="f"><span>Password</span><input class="input" type="password" name="password" minlength="6" autocomplete="new-password" required></label>
+      <label class="f"><span>Confirm password</span><input class="input" type="password" name="password2" minlength="6" autocomplete="new-password" required></label>
+      <button class="btn" style="width:100%;padding:12px">Create account</button>
+      <p class="muted" style="text-align:center;margin:18px 0 0;font-size:14px">Already have an account? <a href="#" id="to-login">Sign in</a></p>` : `
       <h1>Welcome back</h1><p class="muted" style="margin:0 0 22px">Sign in to manage your servers.</p>
       <label class="f"><span>Username or email</span><input class="input" name="username" autocomplete="username" required></label>
       <label class="f"><span>Password</span><input class="input" type="password" name="password" autocomplete="current-password" required></label>
       <button class="btn" style="width:100%;padding:12px">Sign in</button>
+      ${state.registration ? `<p class="muted" style="text-align:center;margin:18px 0 0;font-size:14px">New here? <a href="#" id="to-register">Create an account</a></p>` : ''}`}
     </form></div>
   </div>`;
   state.flowers = FlowerRain($('.login-art canvas'), { count: 60 });
+  if ($('#to-register')) $('#to-register').onclick = (e) => { e.preventDefault(); renderLogin('register'); };
+  if ($('#to-login')) $('#to-login').onclick = (e) => { e.preventDefault(); renderLogin('login'); };
   $('#login').onsubmit = async (e) => {
     e.preventDefault();
+    const d = formData(e.target);
+    if (reg && d.password !== d.password2) return toast('Passwords do not match');
     await act($('#login button'), async () => {
-      await api('POST', '/api/auth/login', formData(e.target));
+      if (reg) { delete d.password2; await api('POST', '/api/auth/register', d); toast('Welcome! Your account is ready.', true); }
+      else await api('POST', '/api/auth/login', d);
       $('#app').innerHTML = '';
       if (state.flowers) state.flowers.stop(); state.flowers = null;
       await boot();
@@ -560,7 +575,8 @@ async function pageNodes() {
     `<div class="grid g2">${nodes.map((n) => `<div class="card server-card">
       <div class="top"><div><h3>${esc(n.name)} ${n.local ? '<span class="badge" style="margin-left:6px">local</span>' : ''}</h3><span class="mono muted">${esc(n.url)}</span></div>${n.online ? '<span class="badge ok"><i class="pulse"></i>online</span>' : '<span class="badge">offline</span>'}</div>
       <dl class="kv" style="margin-top:14px"><dt>Public IP</dt><dd class="mono">${esc(n.ip)}</dd><dt>Ports</dt><dd class="mono">${n.portStart} – ${n.portEnd}</dd><dt>Servers</dt><dd>${n.servers}</dd>
-      ${n.system ? `<dt>Host</dt><dd>${esc(n.system.hostname)} · ${n.system.cpus} CPU · ${fmtBytes(n.system.memTotal)} RAM</dd><dt>Docker</dt><dd>${n.system.docker ? 'connected' : '<span style="color:var(--red)">not reachable</span>'}</dd>` : ''}</dl>
+      ${n.system ? `<dt>Host</dt><dd>${esc(n.system.hostname)} · ${n.system.cpus} CPU · ${fmtBytes(n.system.memTotal)} RAM</dd>
+        <dt>Runtime</dt><dd>${n.system.runtime === 'process' ? `Java process (no Docker) · ${(n.system.java || []).length ? 'Java ' + n.system.java.join(', ') : '<span style="color:var(--red)">Java not installed</span>'}` : (n.system.docker ? 'Docker · connected' : '<span style="color:var(--red)">Docker not reachable</span>')}</dd>` : ''}</dl>
       <div class="btn-row" style="margin-top:14px"><button class="btn ghost sm" data-edit="${n.id}">${icon('edit')}Edit</button>${n.local ? '' : `<button class="btn ghost sm" data-del="${n.id}">${icon('trash')}Delete</button>`}</div>
     </div>`).join('')}</div>
     <div class="card" style="margin-top:18px"><h3>Add another machine</h3><p class="sub" style="margin:0">On the new VPS run <span class="mono">bash install.sh --node-only</span>. It prints the daemon URL and token — paste them in <b>Add node</b>.</p></div>`;
@@ -582,9 +598,24 @@ async function pageAdminServers() {
   $('#content').innerHTML = head('Servers', 'Every server on every node', `<button class="btn" id="new-srv">${icon('plus')}Create server</button>`) +
     `<div class="card"><div class="table-wrap"><table class="t"><thead><tr><th>Name</th><th>Owner</th><th>Software</th><th>Node</th><th>Address</th><th>RAM</th><th></th></tr></thead><tbody>
     ${list.length ? list.map((s) => `<tr><td><a href="#/server/${s.id}"><b>${esc(s.name)}</b></a></td><td>${esc(s.ownerName)}</td><td>${esc(SOFTWARE[s.software]?.name)} ${esc(s.version)}</td><td>${esc(s.nodeName)}</td><td class="mono">${esc(s.address)}</td><td>${s.memory} MB</td>
-      <td class="right" style="white-space:nowrap"><a class="btn ghost sm" href="#/server/${s.id}">Manage</a> <button class="btn ghost sm" data-del="${s.id}" data-name="${esc(s.name)}">${icon('trash')}</button></td></tr>`).join('') : '<tr><td colspan="7" class="muted">No servers yet — click Create server.</td></tr>'}
+      <td class="right" style="white-space:nowrap"><a class="btn ghost sm" href="#/server/${s.id}">Manage</a> <button class="btn ghost sm" data-edit="${s.id}">${icon('edit')}</button> <button class="btn ghost sm" data-del="${s.id}" data-name="${esc(s.name)}">${icon('trash')}</button></td></tr>`).join('') : '<tr><td colspan="7" class="muted">No servers yet — click Create server.</td></tr>'}
     </tbody></table></div></div>`;
   $('#new-srv').onclick = createServerModal;
+  $$('[data-edit]').forEach((b) => (b.onclick = async () => {
+    const s = list.find((x) => x.id === b.dataset.edit);
+    const users = await api('GET', '/api/admin/users');
+    modal({
+      title: 'Edit ' + s.name,
+      body: `<form id="es">
+        <label class="f"><span>Name</span><input class="input" name="name" maxlength="40" value="${esc(s.name)}" required></label>
+        <label class="f"><span>Owner</span><select class="input" name="ownerId">${users.map((u) => `<option value="${u.id}" ${u.id === s.ownerId ? 'selected' : ''}>${esc(u.username)}</option>`).join('')}</select></label>
+        <label class="f"><span>Memory (MB)</span><input class="input" type="number" name="memory" min="512" step="256" value="${s.memory}"><small>Applies on next restart.</small></label>
+        <label class="f"><span>Public address (optional)</span><input class="input mono" name="publicAddress" value="${esc(s.publicAddress || '')}" placeholder="e.g. shortline.proxy.rlwy.net:12345"><small>Use when players connect through a proxy (Railway TCP proxy, playit.gg). Leave empty to use node IP:port.</small></label>
+      </form>`,
+      footer: `<button class="btn ghost" data-close>Cancel</button><button class="btn" form="es">Save</button>`,
+      onMount: (el, close) => { $('#es', el).onsubmit = (e) => { e.preventDefault(); const d = formData(e.target); if (+d.memory === s.memory) delete d.memory; act(null, () => api('PATCH', `/api/admin/servers/${s.id}`, d), 'Saved').then(() => { close(); render(); }).catch(() => {}); }; },
+    });
+  }));
   $$('[data-del]').forEach((b) => (b.onclick = async () => {
     if (!(await confirmBox(`Delete ${b.dataset.name}?`, 'The container, world and all files will be permanently deleted.'))) return;
     try { await act(b, () => api('DELETE', `/api/admin/servers/${b.dataset.del}`), 'Server deleted'); render(); }
@@ -678,7 +709,10 @@ async function pageSettings() {
   const s = await api('GET', '/api/admin/settings');
   $('#content').innerHTML = head('Settings', 'Only admins can change these') + `
   <div class="card" style="max-width:560px"><h3>Panel name</h3><p class="sub">Shown in the sidebar, login page and browser tab.</p>
-    <form id="sf"><label class="f"><span>Name</span><input class="input" name="panelName" maxlength="40" value="${esc(s.panelName)}" required></label><button class="btn">Save</button></form></div>`;
+    <form id="sf"><label class="f"><span>Name</span><input class="input" name="panelName" maxlength="40" value="${esc(s.panelName)}" required></label><button class="btn">Save</button></form></div>
+  <div class="card" style="max-width:560px"><h3>Registration</h3><p class="sub">Let people create their own account from the login page. New accounts are normal users (never admin) and have no servers until you give them one.</p>
+    <label class="check"><input type="checkbox" id="reg" ${s.registration ? 'checked' : ''}> Allow new users to register</label></div>`;
+  $('#reg').onchange = (e) => act(null, () => api('PUT', '/api/admin/settings', { registration: e.target.checked }), e.target.checked ? 'Registration opened' : 'Registration closed').catch(() => { e.target.checked = !e.target.checked; });
   $('#sf').onsubmit = (e) => { e.preventDefault(); act($('#sf button'), () => api('PUT', '/api/admin/settings', formData(e.target)), 'Panel name updated').then((r) => {
     state.panelName = r.panelName; document.title = r.panelName; $('#panel-name').textContent = r.panelName; $('#panel-name-m').textContent = r.panelName;
   }).catch(() => {}); };
