@@ -232,22 +232,30 @@ app.get('/api/servers/:id/status', wrap(async (req, res) => {
 
 app.post('/api/servers/:id/command', wrap(async (req, res) => {
   const id = srv(req);
-  await sendCommand(id, String(req.body.command || ''));
-  res.json({ ok: true });
+  const output = await sendCommand(id, String(req.body.command || ''));
+  res.json({ ok: true, output });
 }));
 
 async function sendCommand(id, cmd) {
   cmd = cmd.replace(/^\//, '').trim();
   if (!cmd) return;
   const c = docker.getContainer(cname(id));
-  const run = async (Cmd) => {
-    const ex = await c.exec({ Cmd, AttachStdout: true, AttachStderr: true });
+  const run = async (Cmd, User) => {
+    const ex = await c.exec({ Cmd, User, AttachStdout: true, AttachStderr: true });
     const stream = await ex.start({});
-    await new Promise((r) => { stream.on('end', r); stream.on('close', r); stream.resume(); setTimeout(r, 5000); });
-    return (await ex.inspect()).ExitCode;
+    let out = '';
+    const pt = new PassThrough();
+    pt.on('data', (d) => { out += d.toString('utf8'); });
+    docker.modem.demuxStream(stream, pt, pt);
+    await new Promise((r) => { stream.on('end', r); stream.on('close', r); setTimeout(r, 5000); });
+    return { code: (await ex.inspect()).ExitCode, out };
   };
-  const code = await run(['mc-send-to-console', ...cmd.split(' ')]);
-  if (code !== 0) await run(['rcon-cli', ...cmd.split(' ')]);
+  // 1) write into the server console pipe as the minecraft user -> result shows in the normal log
+  const viaPipe = await run(['mc-send-to-console', ...cmd.split(' ')], '1000').catch(() => ({ code: 1 }));
+  if (viaPipe.code === 0) return '';
+  // 2) fallback: RCON, and hand its reply back so the console can show it
+  const viaRcon = await run(['rcon-cli', ...cmd.split(' ')]);
+  return viaRcon.out.replace(/\x1b\[[0-9;]*m/g, '');
 }
 
 // ---------- files ----------
@@ -339,7 +347,7 @@ server.on('upgrade', (req, socket, head) => {
 async function onConsole(ws, id) {
   const say = (t) => { if (ws.readyState === 1) ws.send(t); };
   ws.on('message', (msg) => {
-    try { const d = JSON.parse(msg); if (d.type === 'cmd') sendCommand(id, d.data).catch((e) => say('\x1b[31m[RedPanel] ' + e.message + '\n')); } catch {}
+    try { const d = JSON.parse(msg); if (d.type === 'cmd') sendCommand(id, d.data).then((o) => { if (o && o.trim()) say(o.endsWith('\n') ? o : o + '\n'); }).catch((e) => say('\x1b[31m[RedPanel] ' + e.message + '\n')); } catch {}
   });
   const ex = await getContainer(id);
   if (!ex) {
